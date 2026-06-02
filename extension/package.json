@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "tsx --test test/offscreen.test.ts"
+    "test": "tsx --test test/offscreen.test.ts test/crawl.test.ts test/corpusFormatter.test.ts"
   },
   "dependencies": {
     "defuddle": "latest",

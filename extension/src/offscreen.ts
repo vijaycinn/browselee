@@ -1,8 +1,19 @@
 // Offscreen document: parses HTML with DOMParser and runs Defuddle extraction.
 import Defuddle from 'defuddle';
-import type { ExtractRequest, ExtractResponse, ExtractedPage } from './shared/messages';
+import type { ExtractRequest, ExtractResponse, ExtractedPage, ExtractLinksRequest } from './shared/messages';
+import { extractLinks, DEFAULTS } from './lib/crawl';
 
-chrome.runtime.onMessage.addListener((msg: ExtractRequest, _sender, _sendResponse) => {
+chrome.runtime.onMessage.addListener((msg: ExtractRequest | ExtractLinksRequest, _sender, _sendResponse) => {
+  // ── extract:links — parse HTML with DOMParser and return anchor hrefs ──
+  if (msg.kind === 'extract:links') {
+    const { html, baseUrl, correlationId } = msg;
+    const links = extractLinks(html, baseUrl, DEFAULTS);
+    chrome.runtime
+      .sendMessage({ kind: 'extract:links:result', correlationId, links })
+      .catch((err: unknown) => console.error('[offscreen] failed to send links result:', err));
+    return false;
+  }
+
   if (msg.kind !== 'extract:current-page' && msg.kind !== 'extract:from-html') return false;
 
   const { html, url, correlationId } = msg;

@@ -31,7 +31,24 @@ export type CrawlRequest = { kind: 'crawl:start'; tabId: number };
 export type CrawlProgress = { kind: 'crawl:progress'; done: number; total: number };
 export type CrawlComplete = { kind: 'crawl:complete'; corpus: PageCorpus };
 
-export type SessionRequest = { kind: 'session:request' };
+// ---------------------------------------------------------------------------
+// Link-extraction messages  (SW ↔ offscreen; not part of WidgetToSW)
+// ---------------------------------------------------------------------------
+
+export type ExtractLinksRequest = {
+  kind: 'extract:links';
+  html: string;
+  baseUrl: string;
+  correlationId: string;
+};
+
+export type ExtractLinksResult = {
+  kind: 'extract:links:result';
+  correlationId: string;
+  links: string[];
+};
+
+export type SessionRequest = { kind: 'session:request'; voice?: string; instructions?: string };
 export type SessionResponse =
   | { kind: 'session:response'; ok: true; clientSecret: string; expiresAt: number; webrtcUrl: string; model: string }
   | { kind: 'session:response'; ok: false; error: string };

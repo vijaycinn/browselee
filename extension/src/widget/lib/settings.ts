@@ -1,6 +1,7 @@
 export interface Settings {
   model: string;
   voice: string;
+  whisperDeployment?: string;
 }
 
 const DEFAULTS: Settings = {

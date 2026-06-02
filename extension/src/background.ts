@@ -1,12 +1,16 @@
 // Service Worker: routes extract/crawl/session messages between content, offscreen, and widget.
-// TODO: ext-crawl  — handle CrawlRequest, emit CrawlProgress / CrawlComplete
 // TODO: ext-realtime — handle SessionRequest, return SessionResponse
 import type {
   WidgetToSW,
   SWToWidget,
   ExtractResponse,
   ExtractedPage,
+  ExtractLinksResult,
+  PageCorpus,
+  CrawlProgress,
+  CrawlComplete,
 } from './shared/messages';
+import { runCrawl, DEFAULTS } from './lib/crawl';
 
 // ---------------------------------------------------------------------------
 // Offscreen document lifecycle
@@ -49,6 +53,20 @@ interface PendingEntry {
 const pending = new Map<string, PendingEntry>();
 
 const EXTRACT_TIMEOUT_MS = 30_000;
+
+// ---------------------------------------------------------------------------
+// Pending-links registry  (correlationId → resolve/reject for extract:links)
+// ---------------------------------------------------------------------------
+
+interface PendingLinksEntry {
+  resolve: (links: string[]) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+const pendingLinks = new Map<string, PendingLinksEntry>();
+
+const LINKS_TIMEOUT_MS = 5_000;
 
 /**
  * Core relay: ensure offscreen is open, register a pending entry keyed by
@@ -109,12 +127,195 @@ export async function extractFromHtml(html: string, url: string): Promise<Extrac
 }
 
 // ---------------------------------------------------------------------------
+// Link extraction via offscreen DOMParser
+// ---------------------------------------------------------------------------
+
+async function extractLinksViaOffscreen(html: string, baseUrl: string): Promise<string[]> {
+  await ensureOffscreen();
+  const correlationId = crypto.randomUUID();
+
+  return new Promise<string[]>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingLinks.delete(correlationId);
+      reject(new Error(`[SW] extract:links timed out (${correlationId})`));
+    }, LINKS_TIMEOUT_MS);
+
+    pendingLinks.set(correlationId, { resolve, reject, timer });
+
+    chrome.runtime
+      .sendMessage({ kind: 'extract:links', html, baseUrl, correlationId })
+      .catch((err: unknown) => {
+        const entry = pendingLinks.get(correlationId);
+        if (entry) {
+          clearTimeout(entry.timer);
+          pendingLinks.delete(correlationId);
+          entry.reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Corpus cache  (tabId → latest PageCorpus for instant re-opens)
+// ---------------------------------------------------------------------------
+
+const corpusCache = new Map<number, PageCorpus>();
+
+// ---------------------------------------------------------------------------
+// Widget port management + broadcasting
+// ---------------------------------------------------------------------------
+
+const widgetPorts = new Set<chrome.runtime.Port>();
+
+function broadcastToWidget(msg: CrawlProgress | CrawlComplete): void {
+  for (const port of widgetPorts) {
+    try {
+      port.postMessage(msg as SWToWidget);
+    } catch {
+      widgetPorts.delete(port);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session request handler  (ext-realtime)
+// ---------------------------------------------------------------------------
+
+async function handleSessionRequest(
+  msg: { kind: 'session:request'; voice?: string; instructions?: string },
+  port: chrome.runtime.Port,
+): Promise<void> {
+  let backendUrl: string;
+  try {
+    const stored = await chrome.storage.local.get(['BROWSELEE_BACKEND_URL']);
+    backendUrl =
+      (stored['BROWSELEE_BACKEND_URL'] as string | undefined) ?? 'http://localhost:8080';
+  } catch {
+    backendUrl = 'http://localhost:8080';
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8_000);
+
+  try {
+    const body: Record<string, string> = {};
+    if (msg.voice) body.voice = msg.voice;
+    if (msg.instructions) body.instructions = msg.instructions;
+
+    const response = await fetch(`${backendUrl}/api/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timer);
+
+    if (!response.ok) {
+      let errDetail: string;
+      try {
+        const j = (await response.json()) as { error?: string };
+        errDetail = j.error ?? `HTTP ${response.status}`;
+      } catch {
+        errDetail = `HTTP ${response.status}`;
+      }
+      port.postMessage({ kind: 'session:response', ok: false, error: errDetail } as SWToWidget);
+      return;
+    }
+
+    const json = (await response.json()) as {
+      clientSecret: string;
+      expiresAt: number | null;
+      webrtcCallsUrl: string;
+      model: string;
+    };
+
+    // Never log clientSecret
+    port.postMessage({
+      kind: 'session:response',
+      ok: true,
+      clientSecret: json.clientSecret,
+      expiresAt: json.expiresAt ?? 0,
+      webrtcUrl: json.webrtcCallsUrl,
+      model: json.model,
+    } as SWToWidget);
+  } catch (err: unknown) {
+    clearTimeout(timer);
+    const isTimeout = err instanceof Error && err.name === 'AbortError';
+    const error = isTimeout ? 'session_request_timeout' : 'session_request_failed';
+    try {
+      port.postMessage({ kind: 'session:response', ok: false, error } as SWToWidget);
+    } catch {
+      // Port disconnected; nothing to do.
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Port connection handler (widget connects via content script port)
+// ---------------------------------------------------------------------------
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'browselee-widget') return;
+
+  widgetPorts.add(port);
+  port.onDisconnect.addListener(() => widgetPorts.delete(port));
+
+  port.onMessage.addListener(async (msg: WidgetToSW) => {
+    if (msg.kind === 'session:request') {
+      await handleSessionRequest(msg, port);
+      return;
+    }
+    if (msg.kind !== 'crawl:start') return;
+
+    // Resolve tabId: content.ts sends tabId:0, use sender tab or active tab
+    let tabId = msg.tabId;
+    if (!tabId) {
+      try {
+        const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        tabId = activeTab?.id ?? 0;
+      } catch {
+        tabId = 0;
+      }
+    }
+
+    // Return cached corpus immediately if available
+    if (tabId && corpusCache.has(tabId)) {
+      port.postMessage({ kind: 'crawl:complete', corpus: corpusCache.get(tabId)! } as SWToWidget);
+      return;
+    }
+
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => ({ html: document.documentElement.outerHTML, url: location.href }),
+      });
+      const { html, url } = results[0].result as { html: string; url: string };
+
+      const corpus = await runCrawl(html, url, DEFAULTS, {
+        extractFromHtml,
+        getLinks: extractLinksViaOffscreen,
+        onProgress: (done, total) => {
+          broadcastToWidget({ kind: 'crawl:progress', done, total });
+        },
+      });
+
+      if (tabId) corpusCache.set(tabId, corpus);
+      broadcastToWidget({ kind: 'crawl:complete', corpus });
+    } catch (err: unknown) {
+      const msg2 = err instanceof Error ? err.message : String(err);
+      console.error(`[SW] crawl failed for tab ${tabId}: ${msg2}`);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Message router
 // ---------------------------------------------------------------------------
 
 chrome.runtime.onMessage.addListener(
   (
-    msg: WidgetToSW | ExtractResponse,
+    msg: WidgetToSW | ExtractResponse | ExtractLinksResult,
     _sender,
     sendResponse: (r: SWToWidget) => void,
   ): boolean => {
@@ -143,6 +344,18 @@ chrome.runtime.onMessage.addListener(
         } else {
           entry.reject(new Error(msg.error));
         }
+      }
+      return false;
+    }
+
+    // ── extract:links:result — from offscreen after DOMParser link scan ──
+    if (msg.kind === 'extract:links:result') {
+      const { correlationId, links } = msg;
+      const entry = pendingLinks.get(correlationId);
+      if (entry) {
+        clearTimeout(entry.timer);
+        pendingLinks.delete(correlationId);
+        entry.resolve(links);
       }
       return false;
     }
