@@ -1,0 +1,27 @@
+{
+  "name": "browselee",
+  "version": "0.0.1",
+  "description": "Multi-context browser extension for document analysis and semantic navigation",
+  "type": "module",
+  "private": true,
+  "workspaces": [
+    "extension",
+    "backend"
+  ],
+  "scripts": {
+    "build": "pnpm -r build",
+    "lint": "eslint .",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "eslint": "^9.0.0",
+    "prettier": "^3.0.0",
+    "typescript": "^5.0.0",
+    "typescript-eslint": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20",
+    "pnpm": ">=9.0.0"
+  }
+}

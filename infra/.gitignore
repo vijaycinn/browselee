@@ -1,0 +1,2 @@
+# Azure AI Foundry config — contains subscription/tenant IDs, do not commit
+.foundry-config.json
