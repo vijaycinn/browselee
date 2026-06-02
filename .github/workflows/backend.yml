@@ -1,0 +1,80 @@
+name: Backend
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: 'Deploy to Azure Container Apps'
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  ACA_NAME: ${{ vars.ACA_NAME }}
+  ACA_RG: ${{ vars.ACA_RG }}
+  AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+  AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - run: pnpm install --frozen-lockfile=false
+
+      - run: pnpm --filter @browselee/backend build
+
+      - run: pnpm --filter @browselee/backend test
+
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ env.AZURE_CLIENT_ID }}
+          tenant-id: ${{ env.AZURE_TENANT_ID }}
+          subscription-id: ${{ env.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ACR Login
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f backend/Dockerfile \
+            -t ${{ env.ACR_NAME }}.azurecr.io/browselee-api:${{ github.sha }} \
+            -t ${{ env.ACR_NAME }}.azurecr.io/browselee-api:latest \
+            .
+
+      - name: Push Docker image
+        run: docker push --all-tags ${{ env.ACR_NAME }}.azurecr.io/browselee-api
+
+      - name: Deploy to Azure Container Apps
+        if: ${{ github.event_name == 'push' || inputs.deploy == 'true' }}
+        run: |
+          az containerapp update \
+            -n ${{ env.ACA_NAME }} \
+            -g ${{ env.ACA_RG }} \
+            --image ${{ env.ACR_NAME }}.azurecr.io/browselee-api:${{ github.sha }}
