@@ -1,81 +1,80 @@
 # Browselee Backend
 
-Fastify-based API service for document processing and semantic analysis.
+> See [repo root README](../README.md) for full project overview.
 
-## Setup
+Fastify-based API service for Azure AI Foundry Realtime token minting and text-mode chat streaming.
 
-### Environment Variables
+---
 
-- `FOUNDRY_ENDPOINT`: Azure AI Foundry endpoint (e.g., `https://smec-poc-vcinn-resource.openai.azure.com`)
-- `FOUNDRY_TEXT_MODEL`: Model deployment name (default: `gpt-4o-mini`)
-- `PORT`: Server port (default: `8080`)
-- `AZURE_CLIENT_ID`: (Optional) Managed Identity client ID for production
+## Quick Start
 
-### Local Development
+```powershell
+# Set Foundry env vars
+$env:FOUNDRY_ENDPOINT = "https://smec-poc-vcinn-resource.openai.azure.com"
+$env:FOUNDRY_REALTIME_MODEL = "gpt-realtime-mini"
+$env:FOUNDRY_TEXT_MODEL = "gpt-4o-mini"
 
-```bash
-pnpm install
+# Run locally (uses `az login` for AAD)
 pnpm dev
+
+# Server listens on http://0.0.0.0:8080
 ```
 
-Server will listen on http://0.0.0.0:8080
+---
 
-### Build & Test
+## Endpoints
 
-```bash
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/healthz` | GET | Health check → `{ ok: true }` |
+| `/api/session` | POST | Mint ephemeral Realtime token (rate-limited: 30 req/min) |
+| `/api/chat` | POST | Stream text response via SSE (rate-limited: 60 req/min) |
+
+---
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `FOUNDRY_ENDPOINT` | ✅ | — | Azure AI Foundry resource URL |
+| `FOUNDRY_REALTIME_MODEL` | ✅ | — | Realtime model deployment name |
+| `FOUNDRY_TEXT_MODEL` | ✅ | — | Text model deployment name |
+| `AZURE_CLIENT_ID` | ❌ | — | UAMI client ID (production; dev uses `DefaultAzureCredential`) |
+| `PORT` | ❌ | `8080` | HTTP port |
+
+---
+
+## Authentication
+
+- **Local:** Uses `DefaultAzureCredential` (tries UAMI → env vars → interactive login)
+- **Production:** Uses `ManagedIdentityCredential` when `AZURE_CLIENT_ID` is set
+
+Tokens are cached and auto-refreshed 5 minutes before expiry. See [`src/foundry.ts`](./src/foundry.ts) for implementation.
+
+---
+
+## Build & Test
+
+```powershell
 pnpm build
 pnpm test
 ```
 
-## API Endpoints
+---
 
-### `GET /healthz`
+## Docker
 
-Health check endpoint. Returns `{ ok: true }`.
-
-### `POST /api/chat`
-
-Streaming chat endpoint using Azure AI Foundry's `gpt-4o-mini` deployment.
-
-**Request:**
-```json
-{
-  "messages": [
-    { "role": "system|user|assistant", "content": "..." }
-  ],
-  "context": "Optional markdown context (max 60KB)"
-}
-```
-
-**Response:**
-Server-Sent Events (SSE) stream. Each event contains a delta object with the model's response chunk.
-
-**Example:**
-```bash
-curl -X POST http://localhost:8080/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{
-    "messages": [{"role": "user", "content": "Hello"}],
-    "context": "# Document Title\nSome content..."
-  }'
-```
-
-## Docker Build
-
-**Note:** The `Dockerfile` uses multi-stage builds with relative COPY paths. When building in CI, ensure the build context is set to the repository root:
+Build from repo root (context needs `pnpm-lock.yaml`):
 
 ```bash
 docker build -f backend/Dockerfile -t browselee-backend:latest .
 ```
 
-The Dockerfile will correctly resolve `pnpm-lock.yaml` from the repo root and `src/` from `backend/`.
+---
 
-## Authentication
+## See Also
 
-The service uses Azure AD (AAD) for authentication to Azure AI Foundry:
-
-- **Local Development**: Uses `DefaultAzureCredential`, which tries managed identity, environment variables, then interactive login.
-- **Production**: Uses `ManagedIdentityCredential` when `AZURE_CLIENT_ID` is set, falling back to `DefaultAzureCredential`.
-
-Token caching is automatic — tokens are refreshed 5 minutes before expiry.
-
+- [Main README](../README.md) — architecture, quick start, configuration
+- [Realtime API contract](../docs/realtime-api-notes.md) — GA API endpoints, token scopes
+- [Infra / IaC](../infra/README.md) — Container Apps, UAMI, deployment
+- [GitHub Actions](../.github/workflows/README.md) — CI/CD, OIDC, image pushes
