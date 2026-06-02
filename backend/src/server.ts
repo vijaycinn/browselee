@@ -1,6 +1,14 @@
 import fastify from 'fastify';
+import cors from '@fastify/cors';
+import chatRoutes from './routes/chat.js';
 
 const app = fastify();
+
+// Register CORS middleware
+await app.register(cors, { origin: true, methods: ['POST', 'GET'] });
+
+// Register chat routes
+await app.register(chatRoutes);
 
 app.get('/healthz', async () => {
   return { ok: true };
