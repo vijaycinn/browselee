@@ -1,2 +1,3 @@
 # browselee
-Conversational page agent (Chrome extension + Azure Foundry Realtime) — point at any webpage and chat or talk to it.
+
+> Conversational page agent — Chrome extension + Azure AI Foundry Realtime (gpt-realtime-mini). Work in progress.
