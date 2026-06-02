@@ -10,7 +10,10 @@ export default defineConfig({
     sourcemap: true,
     emptyOutDir: true,
     rollupOptions: {
-      input: { offscreen: 'src/offscreen.html' },
+      input: {
+        offscreen: 'src/offscreen.html',
+        widget: 'src/widget/index.html',
+      },
     },
   },
   server: { port: 5173, strictPort: true, hmr: { port: 5173 } },

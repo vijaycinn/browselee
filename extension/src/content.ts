@@ -1,4 +1,4 @@
-import type { WidgetToSW, SWToWidget } from './shared/messages';
+import type { WidgetToSW, SWToWidget, ExtractRequest, ExtractResponse } from './shared/messages';
 
 (function () {
   if ((window as unknown as { __browseleeInjected?: boolean }).__browseleeInjected) return;
@@ -70,12 +70,41 @@ import type { WidgetToSW, SWToWidget } from './shared/messages';
   window.addEventListener('message', (event: MessageEvent) => {
     if (event.source !== iframe.contentWindow) return;
     const msg = event.data as WidgetToSW | undefined;
-    if (msg && typeof msg.kind === 'string') {
-      try {
-        port?.postMessage(msg);
-      } catch (err) {
-        console.warn('[browselee] port post failed', err);
-      }
+    if (!msg || typeof msg.kind !== 'string') return;
+
+    // Intercept extraction triggers: widget can't access the page DOM, so the
+    // content script captures outerHTML + href before forwarding to the SW.
+    if (msg.kind === 'extract:current-page') {
+      const correlationId = crypto.randomUUID();
+      const req: ExtractRequest = {
+        kind: 'extract:current-page',
+        html: document.documentElement.outerHTML,
+        url: location.href,
+        correlationId,
+      };
+      chrome.runtime
+        .sendMessage(req)
+        .then((resp: ExtractResponse) => {
+          iframe.contentWindow?.postMessage(resp as SWToWidget, '*');
+        })
+        .catch((err: unknown) => {
+          const error = err instanceof Error ? err.message : String(err);
+          console.warn('[browselee] extract failed:', error);
+          const errorResp: ExtractResponse = {
+            kind: 'extract:result',
+            correlationId,
+            ok: false,
+            error,
+          };
+          iframe.contentWindow?.postMessage(errorResp as SWToWidget, '*');
+        });
+      return; // handled; do not forward to port
+    }
+
+    try {
+      port?.postMessage(msg);
+    } catch (err) {
+      console.warn('[browselee] port post failed', err);
     }
   });
 
