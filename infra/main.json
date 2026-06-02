@@ -1,0 +1,471 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.40.2.10011",
+      "templateHash": "5961794545282981463"
+    }
+  },
+  "parameters": {
+    "env": {
+      "type": "string",
+      "defaultValue": "dev",
+      "metadata": {
+        "description": "Deployment environment tag (dev / staging / prod)."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "eastus2",
+      "metadata": {
+        "description": "Azure region for the new resource group and all resources."
+      }
+    },
+    "foundryRg": {
+      "type": "string",
+      "defaultValue": "rg-smec-poc-hf-models",
+      "metadata": {
+        "description": "Existing Foundry resource group (cross-RG role assignment target)."
+      }
+    },
+    "foundryAccountName": {
+      "type": "string",
+      "defaultValue": "smec-poc-vcinn-resource",
+      "metadata": {
+        "description": "Existing Azure AI Foundry account name."
+      }
+    },
+    "foundryEndpoint": {
+      "type": "string",
+      "defaultValue": "https://smec-poc-vcinn-resource.services.ai.azure.com",
+      "metadata": {
+        "description": "Foundry endpoint URL injected into the container as an env var."
+      }
+    },
+    "image": {
+      "type": "string",
+      "defaultValue": "mcr.microsoft.com/k8se/quickstart:latest",
+      "metadata": {
+        "description": "Container image to deploy. Override in CI after the first push to ACR."
+      }
+    }
+  },
+  "variables": {
+    "rgName": "[format('rg-browselee-{0}', parameters('env'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/resourceGroups",
+      "apiVersion": "2022-09-01",
+      "name": "[variables('rgName')]",
+      "location": "[parameters('location')]"
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "identity",
+      "resourceGroup": "[variables('rgName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "env": {
+            "value": "[parameters('env')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "4240648535669385806"
+            }
+          },
+          "parameters": {
+            "env": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ManagedIdentity/userAssignedIdentities",
+              "apiVersion": "2023-01-31",
+              "name": "[format('browselee-{0}-uami', parameters('env'))]",
+              "location": "[parameters('location')]"
+            }
+          ],
+          "outputs": {
+            "uamiId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('browselee-{0}-uami', parameters('env')))]"
+            },
+            "uamiClientId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('browselee-{0}-uami', parameters('env'))), '2023-01-31').clientId]"
+            },
+            "uamiPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('browselee-{0}-uami', parameters('env'))), '2023-01-31').principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('rgName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "aca",
+      "resourceGroup": "[variables('rgName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "env": {
+            "value": "[parameters('env')]"
+          },
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "uamiId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiId.value]"
+          },
+          "uamiClientId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiClientId.value]"
+          },
+          "uamiPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiPrincipalId.value]"
+          },
+          "foundryEndpoint": {
+            "value": "[parameters('foundryEndpoint')]"
+          },
+          "image": {
+            "value": "[parameters('image')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "16935087781103542977"
+            }
+          },
+          "parameters": {
+            "env": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "uamiId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource ID of the User-Assigned Managed Identity."
+              }
+            },
+            "uamiClientId": {
+              "type": "string",
+              "metadata": {
+                "description": "Client ID of the UAMI — injected as AZURE_CLIENT_ID env var."
+              }
+            },
+            "uamiPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal ID of the UAMI — used for AcrPull role assignment."
+              }
+            },
+            "foundryEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Foundry endpoint URL for the FOUNDRY_ENDPOINT env var."
+              }
+            },
+            "image": {
+              "type": "string",
+              "defaultValue": "mcr.microsoft.com/k8se/quickstart:latest",
+              "metadata": {
+                "description": "Container image. Defaults to a harmless quickstart placeholder."
+              }
+            }
+          },
+          "variables": {
+            "acrName": "[format('browseleeacr{0}', uniqueString(resourceGroup().id))]",
+            "acrPullRoleId": "7f951dda-4ed3-4680-a7ca-43fe172d538d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.OperationalInsights/workspaces",
+              "apiVersion": "2022-10-01",
+              "name": "[format('browselee-{0}-logs', parameters('env'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "sku": {
+                  "name": "PerGB2018"
+                },
+                "retentionInDays": 30
+              }
+            },
+            {
+              "type": "Microsoft.ContainerRegistry/registries",
+              "apiVersion": "2023-07-01",
+              "name": "[variables('acrName')]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Basic"
+              },
+              "properties": {
+                "adminUserEnabled": false
+              }
+            },
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.ContainerRegistry/registries', variables('acrName'))]",
+              "name": "[guid(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), parameters('uamiPrincipalId'), variables('acrPullRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('acrPullRoleId'))]",
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerRegistry/registries', variables('acrName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.App/managedEnvironments",
+              "apiVersion": "2023-05-01",
+              "name": "[format('browselee-{0}-env', parameters('env'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "appLogsConfiguration": {
+                  "destination": "log-analytics",
+                  "logAnalyticsConfiguration": {
+                    "customerId": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', format('browselee-{0}-logs', parameters('env'))), '2022-10-01').customerId]",
+                    "sharedKey": "[listKeys(resourceId('Microsoft.OperationalInsights/workspaces', format('browselee-{0}-logs', parameters('env'))), '2022-10-01').primarySharedKey]"
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.OperationalInsights/workspaces', format('browselee-{0}-logs', parameters('env')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.App/containerApps",
+              "apiVersion": "2023-05-01",
+              "name": "[format('browselee-{0}-api', parameters('env'))]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "UserAssigned",
+                "userAssignedIdentities": {
+                  "[format('{0}', parameters('uamiId'))]": {}
+                }
+              },
+              "properties": {
+                "environmentId": "[resourceId('Microsoft.App/managedEnvironments', format('browselee-{0}-env', parameters('env')))]",
+                "configuration": {
+                  "ingress": {
+                    "external": true,
+                    "targetPort": 8080,
+                    "allowInsecure": false
+                  },
+                  "registries": [
+                    {
+                      "server": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), '2023-07-01').loginServer]",
+                      "identity": "[parameters('uamiId')]"
+                    }
+                  ]
+                },
+                "template": {
+                  "containers": [
+                    {
+                      "name": "api",
+                      "image": "[parameters('image')]",
+                      "resources": {
+                        "cpu": "[json('0.5')]",
+                        "memory": "1Gi"
+                      },
+                      "env": [
+                        {
+                          "name": "FOUNDRY_ENDPOINT",
+                          "value": "[parameters('foundryEndpoint')]"
+                        },
+                        {
+                          "name": "FOUNDRY_REALTIME_MODEL",
+                          "value": "gpt-realtime-mini"
+                        },
+                        {
+                          "name": "FOUNDRY_TEXT_MODEL",
+                          "value": "gpt-4o-mini"
+                        },
+                        {
+                          "name": "AZURE_CLIENT_ID",
+                          "value": "[parameters('uamiClientId')]"
+                        },
+                        {
+                          "name": "PORT",
+                          "value": "8080"
+                        },
+                        {
+                          "name": "NODE_ENV",
+                          "value": "production"
+                        }
+                      ]
+                    }
+                  ],
+                  "scale": {
+                    "minReplicas": 1,
+                    "maxReplicas": 3
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ContainerRegistry/registries', variables('acrName'))]",
+                "[resourceId('Microsoft.App/managedEnvironments', format('browselee-{0}-env', parameters('env')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "acrLoginServer": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ContainerRegistry/registries', variables('acrName')), '2023-07-01').loginServer]"
+            },
+            "apiUrl": {
+              "type": "string",
+              "value": "[format('https://{0}', reference(resourceId('Microsoft.App/containerApps', format('browselee-{0}-api', parameters('env'))), '2023-05-01').configuration.ingress.fqdn)]"
+            },
+            "acaName": {
+              "type": "string",
+              "value": "[format('browselee-{0}-api', parameters('env'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity')]",
+        "[subscriptionResourceId('Microsoft.Resources/resourceGroups', variables('rgName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "foundry-role",
+      "resourceGroup": "[parameters('foundryRg')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "foundryAccountName": {
+            "value": "[parameters('foundryAccountName')]"
+          },
+          "uamiPrincipalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.40.2.10011",
+              "templateHash": "6325617396039261965"
+            }
+          },
+          "parameters": {
+            "foundryAccountName": {
+              "type": "string"
+            },
+            "uamiPrincipalId": {
+              "type": "string"
+            }
+          },
+          "variables": {
+            "cognitiveServicesOpenAIUserRoleId": "5e0bd9bd-7b93-4f28-af87-19fc36ad61bd"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('foundryAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', parameters('foundryAccountName')), parameters('uamiPrincipalId'), variables('cognitiveServicesOpenAIUserRoleId'))]",
+              "properties": {
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('cognitiveServicesOpenAIUserRoleId'))]",
+                "principalId": "[parameters('uamiPrincipalId')]",
+                "principalType": "ServicePrincipal"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "apiUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Public HTTPS URL of the Container App."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'aca'), '2025-04-01').outputs.apiUrl.value]"
+    },
+    "uamiClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "Client ID of the User-Assigned Managed Identity (use as AZURE_CLIENT_ID)."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiClientId.value]"
+    },
+    "uamiPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Principal (object) ID of the UAMI — needed for RBAC audits."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'identity'), '2025-04-01').outputs.uamiPrincipalId.value]"
+    },
+    "acrLoginServer": {
+      "type": "string",
+      "metadata": {
+        "description": "ACR login server — use in GitHub Actions docker/login-action."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'aca'), '2025-04-01').outputs.acrLoginServer.value]"
+    },
+    "acaName": {
+      "type": "string",
+      "metadata": {
+        "description": "Container App resource name."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', subscription().subscriptionId, variables('rgName')), 'Microsoft.Resources/deployments', 'aca'), '2025-04-01').outputs.acaName.value]"
+    },
+    "acaRg": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource group that owns the Container App."
+      },
+      "value": "[variables('rgName')]"
+    }
+  }
+}

@@ -1,2 +1,5 @@
 # Azure AI Foundry config — contains subscription/tenant IDs, do not commit
 .foundry-config.json
+
+# Deployment outputs — contain ACR login server, UAMI IDs, etc., do not commit
+.deployment-outputs.json
