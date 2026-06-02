@@ -1,13 +1,91 @@
-// TODO: ext-widget-ui — inject widget iframe, relay WidgetToSW / SWToWidget messages
 import type { WidgetToSW, SWToWidget } from './shared/messages';
 
-// Relay messages from the widget iframe to the service worker.
-window.addEventListener('message', (event: MessageEvent<WidgetToSW>) => {
-  // ext-widget-ui will validate origin before forwarding.
-  void event;
-});
+(function () {
+  if ((window as unknown as { __browseleeInjected?: boolean }).__browseleeInjected) return;
+  (window as unknown as { __browseleeInjected?: boolean }).__browseleeInjected = true;
 
-// Relay messages from the service worker back to the widget iframe.
-chrome.runtime.onMessage.addListener((msg: SWToWidget) => {
-  void msg;
-});
+  // Create shadow host
+  const host = document.createElement('div');
+  host.id = 'browselee-host';
+  const shadow = host.attachShadow({ mode: 'open' });
+
+  // Iframe style inside shadow (no host page style bleed)
+  const style = document.createElement('style');
+  style.textContent = `
+    iframe {
+      position: fixed;
+      bottom: 0;
+      right: 0;
+      width: 420px;
+      height: 600px;
+      border: none;
+      z-index: 2147483646;
+      background: transparent;
+      pointer-events: auto;
+    }
+  `;
+  shadow.appendChild(style);
+
+  const iframe = document.createElement('iframe');
+  iframe.src = chrome.runtime.getURL('src/widget/index.html');
+  iframe.allow = 'microphone';
+  shadow.appendChild(iframe);
+
+  document.documentElement.appendChild(host);
+
+  // Connect port to SW
+  let port: chrome.runtime.Port | null = null;
+  let reconnectTimer: number | null = null;
+
+  function connectPort() {
+    try {
+      port = chrome.runtime.connect({ name: 'browselee-widget' });
+    } catch (err) {
+      console.warn('[browselee] port connect failed', err);
+      scheduleReconnect();
+      return;
+    }
+
+    port.onMessage.addListener((msg: SWToWidget) => {
+      iframe.contentWindow?.postMessage(msg, '*');
+    });
+
+    port.onDisconnect.addListener(() => {
+      port = null;
+      scheduleReconnect();
+    });
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer !== null) return;
+    reconnectTimer = window.setTimeout(() => {
+      reconnectTimer = null;
+      connectPort();
+    }, 2000);
+  }
+
+  connectPort();
+
+  // Relay widget → SW
+  window.addEventListener('message', (event: MessageEvent) => {
+    if (event.source !== iframe.contentWindow) return;
+    const msg = event.data as WidgetToSW | undefined;
+    if (msg && typeof msg.kind === 'string') {
+      try {
+        port?.postMessage(msg);
+      } catch (err) {
+        console.warn('[browselee] port post failed', err);
+      }
+    }
+  });
+
+  // Eager crawl on iframe load
+  iframe.addEventListener('load', () => {
+    const crawlMsg: WidgetToSW = { kind: 'crawl:start', tabId: 0 };
+    try {
+      port?.postMessage(crawlMsg);
+    } catch (err) {
+      console.warn('[browselee] initial crawl post failed', err);
+    }
+  });
+})();

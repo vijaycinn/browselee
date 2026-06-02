@@ -1,9 +1,14 @@
 // Message envelope between content script ⇄ SW ⇄ offscreen ⇄ widget iframe.
 
-export type ExtractRequest = { kind: 'extract:current-page'; html: string; url: string };
+export type ExtractRequest =
+  /** Sent by content script to SW: page HTML captured from the live tab. */
+  | { kind: 'extract:current-page'; html: string; url: string; correlationId: string }
+  /** Sent by SW to offscreen (or by ext-crawl via SW): arbitrary HTML string. */
+  | { kind: 'extract:from-html'; html: string; url: string; correlationId: string };
+
 export type ExtractResponse =
-  | { kind: 'extract:result'; ok: true; page: ExtractedPage }
-  | { kind: 'extract:result'; ok: false; error: string };
+  | { kind: 'extract:result'; correlationId: string; ok: true; page: ExtractedPage }
+  | { kind: 'extract:result'; correlationId: string; ok: false; error: string };
 
 export interface ExtractedPage {
   url: string;

@@ -1,14 +1,22 @@
 import fastify from 'fastify';
 import cors from '@fastify/cors';
+import rateLimit from '@fastify/rate-limit';
 import chatRoutes from './routes/chat.js';
+import sessionRoutes from './routes/session.js';
 
 const app = fastify();
 
 // Register CORS middleware
 await app.register(cors, { origin: true, methods: ['POST', 'GET'] });
 
+// Global rate-limit (60 req/min per IP); /api/session overrides to 30 req/min via route config
+await app.register(rateLimit, { max: 60, timeWindow: '1 minute' });
+
 // Register chat routes
 await app.register(chatRoutes);
+
+// Register session (Realtime ephemeral token) routes
+await app.register(sessionRoutes);
 
 app.get('/healthz', async () => {
   return { ok: true };

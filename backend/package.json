@@ -13,6 +13,7 @@
   "dependencies": {
     "@azure/identity": "^4.0.0",
     "@fastify/cors": "^11.2.0",
+    "@fastify/rate-limit": "^10.0.0",
     "fastify": "^5.0.0",
     "openai": "^6.41.0",
     "zod": "^4.4.3"
