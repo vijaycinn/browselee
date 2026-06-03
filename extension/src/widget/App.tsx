@@ -2,15 +2,69 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import type { KeyboardEvent } from 'react';
 import { useRealtime } from './hooks/useRealtime';
 import { useExtraction } from './hooks/useExtraction';
-import { useChannel } from './hooks/useChannel';
 import { loadSettings, saveSettings } from './lib/settings';
 import type { Settings } from './lib/settings';
+import type { PageCorpus } from '../shared/messages';
+import { formatThemeBlock } from './lib/corpusFormatter';
+
+const CHAT_CONTEXT_BUDGET = 55_000;
+
+/**
+ * Build a lean RAG context for the backend `/api/chat` SSE path.
+ * Backend already injects STRICT_GROUNDING_POLICY, so we send only structured
+ * page content. Headlines surface FIRST so index/feed pages don't get
+ * dominated by sidebar junk that Defuddle picked as "main article".
+ */
+function buildChatContext(corpus: PageCorpus): string {
+  const parts: string[] = [];
+  const cp = corpus.currentPage;
+
+  // Lead with the deterministic theme descriptor so the model frames the
+  // page topic before reading the body. Empty when no theme is attached.
+  const themeBlock = formatThemeBlock(cp.theme);
+  if (themeBlock) parts.push(themeBlock.trimEnd() + '\n');
+
+  parts.push(`# CURRENT PAGE\nURL: ${cp.url}\nTITLE: ${cp.title}\n`);
+
+  // Pull the HEADLINES block (appended by offscreen.ts) out of content and surface it first.
+  const headlineMatch = cp.content.match(/## HEADLINES ON THIS PAGE\n([\s\S]*?)(?:\n##|\n*$)/);
+  if (headlineMatch) {
+    parts.push(`## HEADLINES ON THIS PAGE\n${headlineMatch[1].trim()}\n`);
+  }
+  const articleBody = cp.content.replace(/\n*## HEADLINES ON THIS PAGE\n[\s\S]*$/, '').trim();
+  if (articleBody) {
+    parts.push(`## PAGE CONTENT\n${articleBody}\n`);
+  }
+
+  if (corpus.linkedPages.length > 0) {
+    parts.push(`# LINKED PAGES (1 hop)\n`);
+    for (const p of corpus.linkedPages) {
+      parts.push(`## ${p.title}\nURL: ${p.url}\n${p.content}\n`);
+    }
+  }
+
+  let out = parts.join('\n');
+  if (out.length > CHAT_CONTEXT_BUDGET) {
+    out = out.slice(0, CHAT_CONTEXT_BUDGET) + '\n…[truncated]';
+  }
+  return out;
+}
+
+async function resolveBackendUrl(): Promise<string> {
+  try {
+    const stored = await chrome.storage.local.get(['BROWSELEE_BACKEND_URL']);
+    const v = stored['BROWSELEE_BACKEND_URL'];
+    if (typeof v === 'string' && v.length > 0) return v.replace(/\/$/, '');
+  } catch { /* ignore */ }
+  return 'http://localhost:8080';
+}
 
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
   text: string;
   final: boolean;
+  createdAt: number;
 }
 
 let msgSeq = 0;
@@ -60,6 +114,16 @@ function IconBack() {
     </svg>
   );
 }
+function IconRefresh() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <polyline points="23 4 23 10 17 10"/>
+      <polyline points="1 20 1 14 7 14"/>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/>
+      <path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/>
+    </svg>
+  );
+}
 
 export default function App() {
   const [isOpen, setIsOpen] = useState(false);
@@ -70,11 +134,10 @@ export default function App() {
   const [micActive, setMicActive] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const micStreamRef = useRef<MediaStream | null>(null);
 
-  const { status, startVoice, stopVoice, sendText, transcript, error } = useRealtime();
-  const { isExtracting, progress } = useExtraction();
-  const { send } = useChannel();
+  const { status, startVoice, stopVoice, transcript, error } = useRealtime();
+  const { isExtracting, progress, refresh, corpus } = useExtraction();
+  const [chatBusy, setChatBusy] = useState(false);
 
   // Load settings on mount
   useEffect(() => {
@@ -101,19 +164,93 @@ export default function App() {
   // Show error as system message
   useEffect(() => {
     if (error) {
-      setMessages(prev => [...prev, { id: nextId(), role: 'assistant', text: `⚠️ ${error}`, final: true }]);
+      setMessages(prev => [...prev, { id: nextId(), role: 'assistant', text: `⚠️ ${error}`, final: true, createdAt: Date.now() }]);
     }
   }, [error]);
 
   const handleSend = useCallback(async () => {
     const text = inputText.trim();
-    if (!text) return;
-    setMessages(prev => [...prev, { id: nextId(), role: 'user', text, final: true }]);
+    if (!text || chatBusy) return;
+    if (!corpus) {
+      setMessages(prev => [...prev, {
+        id: nextId(), role: 'assistant',
+        text: 'Still reading the page. Try again in a moment.',
+        final: true, createdAt: Date.now(),
+      }]);
+      return;
+    }
+    const userMsg: ChatMessage = { id: nextId(), role: 'user', text, final: true, createdAt: Date.now() };
+    const asstId = nextId();
+    const asstMsg: ChatMessage = { id: asstId, role: 'assistant', text: '', final: false, createdAt: Date.now() + 1 };
+    setMessages(prev => [...prev, userMsg, asstMsg]);
     setInputText('');
-    await sendText(text);
-    // Also signal a session request to SW (no-op handled by ext-realtime later)
-    send({ kind: 'session:request' });
-  }, [inputText, sendText, send]);
+    setChatBusy(true);
+
+    // Build chat history (typed-only, excluding the placeholder we just added).
+    const history = messages
+      .filter(m => m.final && !m.text.startsWith('\u26A0\uFE0F'))
+      .map(m => ({ role: m.role, content: m.text }));
+    history.push({ role: 'user', content: text });
+
+    const context = buildChatContext(corpus);
+
+    try {
+      const backendUrl = await resolveBackendUrl();
+      const resp = await fetch(`${backendUrl}/api/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: history, context }),
+      });
+      if (!resp.ok || !resp.body) {
+        throw new Error(`HTTP ${resp.status}`);
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let acc = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let idx;
+        while ((idx = buffer.indexOf('\n\n')) >= 0) {
+          const frame = buffer.slice(0, idx);
+          buffer = buffer.slice(idx + 2);
+          const line = frame.split('\n').find(l => l.startsWith('data: '));
+          if (!line) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          try {
+            const evt = JSON.parse(data) as { delta?: { content?: string }; error?: string };
+            if (evt.error) throw new Error(evt.error);
+            const piece = evt.delta?.content;
+            if (piece) {
+              acc += piece;
+              setMessages(prev => prev.map(m => m.id === asstId ? { ...m, text: acc } : m));
+            }
+          } catch (e) {
+            if (e instanceof Error && /^\{/.test(data) === false) throw e;
+          }
+        }
+      }
+      setMessages(prev => prev.map(m => m.id === asstId ? { ...m, text: acc || 'Not on this page.', final: true } : m));
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      let detail: string;
+      if (raw === 'Failed to fetch' || raw.includes('ERR_CONNECTION_REFUSED')) {
+        detail = 'Backend offline — start with: pnpm --filter @browselee/backend dev';
+      } else if (raw.startsWith('HTTP ')) {
+        detail = `Server error (${raw}). Try again.`;
+      } else {
+        detail = raw;
+      }
+      setMessages(prev => prev.map(m => m.id === asstId
+        ? { ...m, text: `⚠️ ${detail}`, final: true }
+        : m));
+    } finally {
+      setChatBusy(false);
+    }
+  }, [inputText, chatBusy, corpus, messages]);
 
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -125,13 +262,11 @@ export default function App() {
   const startMic = useCallback(async () => {
     if (micActive) return;
     try {
-      // Lazy getUserMedia — only on press (UX requirement)
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      micStreamRef.current = stream;
-      setMicActive(true);
       await startVoice();
+      setMicActive(true);
     } catch (err) {
       console.warn('[browselee] mic access denied', err);
+      setMicActive(false);
     }
   }, [micActive, startVoice]);
 
@@ -139,8 +274,6 @@ export default function App() {
     if (!micActive) return;
     setMicActive(false);
     stopVoice();
-    micStreamRef.current?.getTracks().forEach(t => t.stop());
-    micStreamRef.current = null;
   }, [micActive, stopVoice]);
 
   const handleSettingChange = useCallback(async (key: keyof Settings, value: string) => {
@@ -149,7 +282,7 @@ export default function App() {
     await saveSettings(next);
   }, [settings]);
 
-  // Merge transcript into visible list
+  // Merge typed messages and realtime transcript in chronological order.
   const allMessages: ChatMessage[] = [
     ...messages,
     ...transcript.map((t, i) => ({
@@ -157,8 +290,9 @@ export default function App() {
       role: t.role,
       text: t.text,
       final: t.final,
+      createdAt: t.createdAt,
     })),
-  ];
+  ].sort((a, b) => a.createdAt - b.createdAt);
 
   return (
     <>
@@ -186,6 +320,15 @@ export default function App() {
           </span>
           <button
             className="icon-btn"
+            onClick={refresh}
+            disabled={isExtracting}
+            aria-label="Refresh page extraction"
+            title="Refresh page extraction"
+          >
+            <IconRefresh />
+          </button>
+          <button
+            className="icon-btn"
             onClick={() => setSettingsOpen(true)}
             aria-label="Open settings"
           >
@@ -199,6 +342,29 @@ export default function App() {
             <IconClose />
           </button>
         </header>
+
+        {(() => {
+          const t = corpus?.currentPage.theme;
+          if (!t) return null;
+          const titleLine = t.pageTitle || t.h1;
+          const meta = [t.siteName, t.siteType !== 'generic' ? t.siteType : ''].filter(Boolean).join(' · ');
+          if (!titleLine && !meta) return null;
+          return (
+            <div className="theme-banner" aria-label="Page theme">
+              <div className="theme-banner-title" title={`${titleLine} — ${meta}`}>
+                <span className="theme-banner-icon" aria-hidden="true">📄</span>
+                <span className="theme-banner-text">
+                  {titleLine}{meta ? <span className="theme-banner-meta"> — {meta}</span> : null}
+                </span>
+              </div>
+              {t.topics.length > 0 && (
+                <div className="theme-banner-topics" title={t.topics.join(', ')}>
+                  Topics: {t.topics.slice(0, 5).join(' · ')}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {isExtracting && (
           <div className="extraction-bar" aria-live="polite" aria-label="Extracting page content">
@@ -248,15 +414,16 @@ export default function App() {
             value={inputText}
             onChange={e => setInputText(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Ask about this page…"
+            placeholder={isExtracting ? 'Reading page… please wait' : 'Ask about this page…'}
             rows={1}
+            disabled={isExtracting || chatBusy}
             aria-label="Message input"
             aria-multiline="true"
           />
           <button
             className="send-btn"
             onClick={() => void handleSend()}
-            disabled={!inputText.trim()}
+            disabled={!inputText.trim() || isExtracting || chatBusy}
             aria-label="Send message"
           >
             <IconSend />
@@ -268,6 +435,7 @@ export default function App() {
             onMouseLeave={stopMic}
             onTouchStart={() => void startMic()}
             onTouchEnd={stopMic}
+            disabled={isExtracting}
             aria-label={micActive ? 'Release to stop recording' : 'Hold to talk'}
             aria-pressed={micActive}
           >

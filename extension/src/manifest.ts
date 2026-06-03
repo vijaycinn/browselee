@@ -29,6 +29,6 @@ export default defineManifest({
   icons: { '128': 'icon-128.png' },
   content_security_policy: {
     extension_pages:
-      "script-src 'self'; object-src 'self'; connect-src 'self' https://*.openai.azure.com https://*.services.ai.azure.com https://*.azure-api.net https://*.realtimeapi-preview.ai.azure.com wss://*.realtimeapi-preview.ai.azure.com https://localhost:* http://localhost:*",
+      "script-src 'self'; object-src 'self'; connect-src 'self' https://* http://* wss://* https://localhost:* http://localhost:*",
   },
 });

@@ -1,8 +1,15 @@
+import { config as loadEnv } from 'dotenv';
+import { resolve } from 'node:path';
 import fastify from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
 import chatRoutes from './routes/chat.js';
 import sessionRoutes from './routes/session.js';
+
+loadEnv();
+if (!process.env.FOUNDRY_ENDPOINT) {
+  loadEnv({ path: resolve(process.cwd(), '..', '.env') });
+}
 
 const app = fastify();
 

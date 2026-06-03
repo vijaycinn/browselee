@@ -2,13 +2,41 @@
 
 export type ExtractRequest =
   /** Sent by content script to SW: page HTML captured from the live tab. */
-  | { kind: 'extract:current-page'; html: string; url: string; correlationId: string }
+  | { kind: 'extract:current-page'; html: string; url: string; correlationId: string; innerText?: string }
   /** Sent by SW to offscreen (or by ext-crawl via SW): arbitrary HTML string. */
-  | { kind: 'extract:from-html'; html: string; url: string; correlationId: string };
+  | { kind: 'extract:from-html'; html: string; url: string; correlationId: string; innerText?: string };
 
 export type ExtractResponse =
   | { kind: 'extract:result'; correlationId: string; ok: true; page: ExtractedPage }
   | { kind: 'extract:result'; correlationId: string; ok: false; error: string };
+
+export type SiteType =
+  | 'government'
+  | 'news'
+  | 'ecommerce'
+  | 'docs'
+  | 'blog'
+  | 'forum'
+  | 'generic';
+
+/**
+ * Deterministic, client-side "About this page" descriptor.
+ * Computed once per extraction from JSON-LD + meta tags + DOM signals.
+ * Surfaces both in the widget header (transparency) and as the leading
+ * block in the chat context (so the model frames the page correctly
+ * before reading the body).
+ */
+export interface PageTheme {
+  siteType: SiteType;
+  siteName: string;
+  pageTitle: string;
+  h1: string;
+  description: string;
+  breadcrumbs: string[];
+  topics: string[];
+  urlPathTokens: string[];
+  url: string;
+}
 
 export interface ExtractedPage {
   url: string;
@@ -18,6 +46,8 @@ export interface ExtractedPage {
   published?: string;
   content: string; // markdown
   wordCount: number;
+  /** Deterministic page descriptor extracted client-side from DOM/meta/JSON-LD. */
+  theme?: PageTheme;
 }
 
 export interface PageCorpus {
@@ -27,7 +57,7 @@ export interface PageCorpus {
   truncated: boolean;
 }
 
-export type CrawlRequest = { kind: 'crawl:start'; tabId: number };
+export type CrawlRequest = { kind: 'crawl:start'; tabId: number; force?: boolean };
 export type CrawlProgress = { kind: 'crawl:progress'; done: number; total: number };
 export type CrawlComplete = { kind: 'crawl:complete'; corpus: PageCorpus };
 

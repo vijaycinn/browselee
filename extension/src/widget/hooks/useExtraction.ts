@@ -1,9 +1,9 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useChannel } from './useChannel';
 import type { PageCorpus, CrawlProgress, CrawlComplete } from '../../shared/messages';
 
 export function useExtraction() {
-  const { on } = useChannel();
+  const { on, send } = useChannel();
   const [corpus, setCorpus] = useState<PageCorpus | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [isExtracting, setIsExtracting] = useState(true);
@@ -18,6 +18,10 @@ export function useExtraction() {
       setCorpus(c.corpus);
       setIsExtracting(false);
       setProgress(null);
+      const cp = c.corpus.currentPage;
+      console.info(
+        `[browselee/extract] corpus ready: current=${cp?.wordCount ?? 0}w/${cp?.content?.length ?? 0}ch, linked=${c.corpus.linkedPages.length}, total=${c.corpus.totalChars}ch, url=${cp?.url}`,
+      );
     });
     return () => {
       offProgress();
@@ -25,5 +29,12 @@ export function useExtraction() {
     };
   }, [on]);
 
-  return { corpus, progress, isExtracting };
+  const refresh = useCallback(() => {
+    setCorpus(null);
+    setProgress(null);
+    setIsExtracting(true);
+    send({ kind: 'crawl:start', tabId: 0, force: true });
+  }, [send]);
+
+  return { corpus, progress, isExtracting, refresh };
 }

@@ -131,6 +131,43 @@ body { background: transparent; font-family: -apple-system, BlinkMacSystemFont, 
 .progress-track { height: 3px; background: var(--bg-tertiary); border-radius: 2px; overflow: hidden; }
 .progress-fill { height: 100%; background: var(--accent); border-radius: 2px; transition: width 0.3s; }
 
+/* Page theme banner — frames "what is this page" for the user */
+.theme-banner {
+  padding: 6px 16px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.theme-banner-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-primary);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.theme-banner-icon { font-size: 12px; }
+.theme-banner-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.theme-banner-meta { color: var(--text-muted); font-weight: 400; }
+.theme-banner-topics {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Messages */
 .messages {
   flex: 1;

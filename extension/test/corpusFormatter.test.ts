@@ -41,7 +41,7 @@ function emptyCorpus(): PageCorpus {
 test('empty corpus: returns preamble, current-page header, no linked section', () => {
   const result = formatCorpusAsInstructions(emptyCorpus());
 
-  assert.ok(result.includes('You are a helpful assistant'), 'preamble present');
+  assert.ok(result.includes('You are Browselee'), 'preamble present');
   assert.ok(result.includes('## CURRENT PAGE'), 'current-page header present');
   assert.ok(result.includes('URL: https://example.com/'), 'URL present');
   assert.ok(result.includes('TITLE: Example'), 'title present');

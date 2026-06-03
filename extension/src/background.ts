@@ -7,10 +7,8 @@ import type {
   ExtractedPage,
   ExtractLinksResult,
   PageCorpus,
-  CrawlProgress,
-  CrawlComplete,
 } from './shared/messages';
-import { runCrawl, DEFAULTS } from './lib/crawl';
+import { runCrawl, DEFAULTS, canonicalUrl } from './lib/crawl';
 
 // ---------------------------------------------------------------------------
 // Offscreen document lifecycle
@@ -73,7 +71,7 @@ const LINKS_TIMEOUT_MS = 5_000;
  * correlationId, send the HTML to the offscreen document, and await its
  * response (which arrives as a separate `extract:result` message).
  */
-async function doExtract(html: string, url: string): Promise<ExtractedPage> {
+async function doExtract(html: string, url: string, innerText?: string): Promise<ExtractedPage> {
   await ensureOffscreen();
 
   const correlationId = crypto.randomUUID();
@@ -89,7 +87,7 @@ async function doExtract(html: string, url: string): Promise<ExtractedPage> {
     pending.set(correlationId, { resolve, reject, timer });
 
     chrome.runtime
-      .sendMessage({ kind: 'extract:from-html', html, url, correlationId })
+      .sendMessage({ kind: 'extract:from-html', html, url, correlationId, innerText })
       .catch((err: unknown) => {
         const entry = pending.get(correlationId);
         if (entry) {
@@ -112,18 +110,18 @@ async function doExtract(html: string, url: string): Promise<ExtractedPage> {
 export async function extractCurrentPage(tabId: number): Promise<ExtractedPage> {
   const results = await chrome.scripting.executeScript({
     target: { tabId },
-    func: () => ({ html: document.documentElement.outerHTML, url: location.href }),
+    func: () => ({ html: document.documentElement.outerHTML, url: location.href, innerText: document.body?.innerText ?? '' }),
   });
-  const { html, url } = results[0].result as { html: string; url: string };
-  return doExtract(html, url);
+  const { html, url, innerText } = results[0].result as { html: string; url: string; innerText: string };
+  return doExtract(html, url, innerText);
 }
 
 /**
  * Extract an arbitrary HTML string without a live tab.
  * Used by ext-crawl to process linked-page HTML already fetched.
  */
-export async function extractFromHtml(html: string, url: string): Promise<ExtractedPage> {
-  return doExtract(html, url);
+export async function extractFromHtml(html: string, url: string, innerText?: string): Promise<ExtractedPage> {
+  return doExtract(html, url, innerText);
 }
 
 // ---------------------------------------------------------------------------
@@ -156,24 +154,45 @@ async function extractLinksViaOffscreen(html: string, baseUrl: string): Promise<
 }
 
 // ---------------------------------------------------------------------------
-// Corpus cache  (tabId → latest PageCorpus for instant re-opens)
+// Corpus cache
+// - In-memory: tabId → {url, corpus} for fast same-tab re-opens.
+// - Persistent: chrome.storage.local keyed by canonical URL so re-opened
+//   widgets can query strictly from the last crawled corpus.
 // ---------------------------------------------------------------------------
 
-const corpusCache = new Map<number, PageCorpus>();
+interface TabCorpusCacheEntry {
+  url: string;
+  corpus: PageCorpus;
+}
 
-// ---------------------------------------------------------------------------
-// Widget port management + broadcasting
-// ---------------------------------------------------------------------------
+const corpusCache = new Map<number, TabCorpusCacheEntry>();
 
-const widgetPorts = new Set<chrome.runtime.Port>();
+const CORPUS_CACHE_KEY_PREFIX = 'browselee:corpus:v1:';
 
-function broadcastToWidget(msg: CrawlProgress | CrawlComplete): void {
-  for (const port of widgetPorts) {
-    try {
-      port.postMessage(msg as SWToWidget);
-    } catch {
-      widgetPorts.delete(port);
-    }
+function corpusCacheKey(url: string): string {
+  return `${CORPUS_CACHE_KEY_PREFIX}${canonicalUrl(url)}`;
+}
+
+async function readCorpusFromLocal(url: string): Promise<PageCorpus | null> {
+  const key = corpusCacheKey(url);
+  try {
+    const obj = await chrome.storage.local.get([key]);
+    const val = obj[key] as PageCorpus | undefined;
+    if (!val || typeof val !== 'object') return null;
+    if (!val.currentPage || !Array.isArray(val.linkedPages)) return null;
+    return val;
+  } catch (err) {
+    console.warn('[SW] failed reading corpus cache:', err);
+    return null;
+  }
+}
+
+async function writeCorpusToLocal(url: string, corpus: PageCorpus): Promise<void> {
+  const key = corpusCacheKey(url);
+  try {
+    await chrome.storage.local.set({ [key]: corpus });
+  } catch (err) {
+    console.warn('[SW] failed writing corpus cache:', err);
   }
 }
 
@@ -258,9 +277,6 @@ async function handleSessionRequest(
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'browselee-widget') return;
 
-  widgetPorts.add(port);
-  port.onDisconnect.addListener(() => widgetPorts.delete(port));
-
   port.onMessage.addListener(async (msg: WidgetToSW) => {
     if (msg.kind === 'session:request') {
       await handleSessionRequest(msg, port);
@@ -279,29 +295,72 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     }
 
-    // Return cached corpus immediately if available
-    if (tabId && corpusCache.has(tabId)) {
-      port.postMessage({ kind: 'crawl:complete', corpus: corpusCache.get(tabId)! } as SWToWidget);
-      return;
-    }
-
     try {
       const results = await chrome.scripting.executeScript({
         target: { tabId },
-        func: () => ({ html: document.documentElement.outerHTML, url: location.href }),
+        func: () => {
+          // Wait for page content to render (SPAs like MSN load async).
+          // Poll until body innerText exceeds threshold or 2s timeout.
+          const MIN_TEXT_LEN = 200;
+          const POLL_INTERVAL = 100;
+          const MAX_WAIT = 2000;
+
+          return new Promise<{ html: string; url: string; innerText: string }>((resolve) => {
+            const text = () => document.body?.innerText ?? '';
+            if (text().length >= MIN_TEXT_LEN) {
+              resolve({ html: document.documentElement.outerHTML, url: location.href, innerText: text() });
+              return;
+            }
+            let elapsed = 0;
+            const timer = setInterval(() => {
+              elapsed += POLL_INTERVAL;
+              if (text().length >= MIN_TEXT_LEN || elapsed >= MAX_WAIT) {
+                clearInterval(timer);
+                resolve({ html: document.documentElement.outerHTML, url: location.href, innerText: text() });
+              }
+            }, POLL_INTERVAL);
+          });
+        },
       });
-      const { html, url } = results[0].result as { html: string; url: string };
+      const { html, url, innerText } = results[0].result as { html: string; url: string; innerText: string };
+      const normalizedUrl = canonicalUrl(url);
+
+      // Unless forced, serve from cache only when URL matches exactly.
+      // This avoids stale reuse when the tab navigated to a different page.
+      if (!msg.force) {
+        if (tabId) {
+          const inMem = corpusCache.get(tabId);
+          if (inMem && inMem.url === normalizedUrl) {
+            port.postMessage({ kind: 'crawl:complete', corpus: inMem.corpus } as SWToWidget);
+            return;
+          }
+        }
+
+        const stored = await readCorpusFromLocal(normalizedUrl);
+        if (stored) {
+          if (tabId) {
+            corpusCache.set(tabId, { url: normalizedUrl, corpus: stored });
+          }
+          port.postMessage({ kind: 'crawl:complete', corpus: stored } as SWToWidget);
+          return;
+        }
+      } else if (tabId) {
+        corpusCache.delete(tabId);
+      }
 
       const corpus = await runCrawl(html, url, DEFAULTS, {
-        extractFromHtml,
+        extractFromHtml: (h, u) => extractFromHtml(h, u, h === html ? innerText : undefined),
         getLinks: extractLinksViaOffscreen,
         onProgress: (done, total) => {
-          broadcastToWidget({ kind: 'crawl:progress', done, total });
+          port.postMessage({ kind: 'crawl:progress', done, total } as SWToWidget);
         },
       });
 
-      if (tabId) corpusCache.set(tabId, corpus);
-      broadcastToWidget({ kind: 'crawl:complete', corpus });
+      if (tabId) {
+        corpusCache.set(tabId, { url: normalizedUrl, corpus });
+      }
+      await writeCorpusToLocal(normalizedUrl, corpus);
+      port.postMessage({ kind: 'crawl:complete', corpus } as SWToWidget);
     } catch (err: unknown) {
       const msg2 = err instanceof Error ? err.message : String(err);
       console.error(`[SW] crawl failed for tab ${tabId}: ${msg2}`);
@@ -321,8 +380,8 @@ chrome.runtime.onMessage.addListener(
   ): boolean => {
     // ── Incoming from content script / widget ──────────────────────────────
     if (msg.kind === 'extract:current-page') {
-      const { html, url, correlationId } = msg;
-      doExtract(html, url)
+      const { html, url, correlationId, innerText } = msg;
+      doExtract(html, url, innerText)
         .then((page) => sendResponse({ kind: 'extract:result', correlationId, ok: true, page }))
         .catch((err: unknown) => {
           const error = err instanceof Error ? err.message : String(err);

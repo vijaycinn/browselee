@@ -45,7 +45,14 @@ async function sessionHandler(request: FastifyRequest<{ Body: unknown }>, reply:
     return reply.status(503).send({ error: 'token_acquisition_failed' });
   }
 
-  const realtimeBaseUrl = getRealtimeBaseUrl();
+  let realtimeBaseUrl: string;
+  try {
+    realtimeBaseUrl = getRealtimeBaseUrl();
+  } catch (err) {
+    console.error(`[${requestId}] Invalid realtime endpoint configuration:`, err);
+    return reply.status(503).send({ error: 'invalid_realtime_endpoint_config' });
+  }
+
   const url = `${realtimeBaseUrl}/openai/v1/realtime/client_secrets`;
 
   const controller = new AbortController();
@@ -94,12 +101,19 @@ async function sessionHandler(request: FastifyRequest<{ Body: unknown }>, reply:
     return reply.status(502).send({ error: 'foundry_invalid_response' });
   }
 
-  // Azure GA response shape: { data: { value: "<ephemeral_token>", expires_at?: number } }
-  const data = (json as Record<string, unknown>)?.data as
-    | Record<string, unknown>
-    | undefined;
-  const clientSecret = data?.value as string | undefined;
-  const expiresAt = (data?.expires_at as number | undefined) ?? null;
+  const payload = (json as Record<string, unknown>) ?? {};
+
+  // Compatibility: Foundry may return either
+  // 1) { data: { value: "<ephemeral_token>", expires_at?: number } }
+  // 2) { value: "<ephemeral_token>", expires_at?: number, session?: {...} }
+  const data = payload.data as Record<string, unknown> | undefined;
+  const clientSecret =
+    (typeof data?.value === 'string' ? data.value : undefined) ??
+    (typeof payload.value === 'string' ? payload.value : undefined);
+  const expiresAt =
+    (typeof data?.expires_at === 'number' ? data.expires_at : undefined) ??
+    (typeof payload.expires_at === 'number' ? payload.expires_at : undefined) ??
+    null;
 
   if (!clientSecret) {
     console.error(`[${requestId}] Foundry response missing data.value — raw:`, json);

@@ -17,7 +17,7 @@ import type { WidgetToSW, SWToWidget, ExtractRequest, ExtractResponse } from './
       bottom: 0;
       right: 0;
       width: 420px;
-      height: 600px;
+      height: 700px;
       border: none;
       z-index: 2147483646;
       background: transparent;
@@ -36,11 +36,22 @@ import type { WidgetToSW, SWToWidget, ExtractRequest, ExtractResponse } from './
   // Connect port to SW
   let port: chrome.runtime.Port | null = null;
   let reconnectTimer: number | null = null;
+  let contextInvalidated = false;
 
   function connectPort() {
+    if (contextInvalidated) return;
+
     try {
       port = chrome.runtime.connect({ name: 'browselee-widget' });
     } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes('Extension context invalidated')) {
+        contextInvalidated = true;
+        console.warn(
+          '[browselee] extension was reloaded. Refresh this tab to re-inject Browselee content script.',
+        );
+        return;
+      }
       console.warn('[browselee] port connect failed', err);
       scheduleReconnect();
       return;
@@ -57,7 +68,7 @@ import type { WidgetToSW, SWToWidget, ExtractRequest, ExtractResponse } from './
   }
 
   function scheduleReconnect() {
-    if (reconnectTimer !== null) return;
+    if (contextInvalidated || reconnectTimer !== null) return;
     reconnectTimer = window.setTimeout(() => {
       reconnectTimer = null;
       connectPort();
@@ -81,6 +92,7 @@ import type { WidgetToSW, SWToWidget, ExtractRequest, ExtractResponse } from './
         html: document.documentElement.outerHTML,
         url: location.href,
         correlationId,
+        innerText: document.body?.innerText ?? '',
       };
       chrome.runtime
         .sendMessage(req)

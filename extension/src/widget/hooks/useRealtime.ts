@@ -11,6 +11,7 @@ export interface TranscriptEntry {
   role: 'user' | 'assistant';
   text: string;
   final: boolean;
+  createdAt: number;
 }
 
 export interface UseRealtimeReturn {
@@ -24,6 +25,17 @@ export interface UseRealtimeReturn {
 
 const VERBOSE = false;
 
+const NOT_READY_TEXT =
+  'I am still reading this page. Please wait until extraction completes, then ask again.';
+
+function hasUsableCorpus(corpus: PageCorpus | null): boolean {
+  if (!corpus) return false;
+  const cp = corpus.currentPage;
+  if (!cp) return false;
+  if (!cp.content || cp.content.trim().length < 200) return false;
+  return true;
+}
+
 export function useRealtime(): UseRealtimeReturn {
   const [status, setStatus] = useState<RealtimeStatus>('idle');
   const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
@@ -33,6 +45,8 @@ export function useRealtime(): UseRealtimeReturn {
   const dcRef = useRef<RTCDataChannel | null>(null);
   const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const initialInstructionsRef = useRef<string | undefined>(undefined);
+  const lastAppliedInstructionsRef = useRef<string>('');
 
   const { send, on } = useChannel();
   const { corpus } = useExtraction();
@@ -50,7 +64,7 @@ export function useRealtime(): UseRealtimeReturn {
       if (last && last.role === 'assistant' && !last.final) {
         return [...prev.slice(0, -1), { ...last, text: last.text + delta, final }];
       }
-      return [...prev, { role: 'assistant', text: delta, final }];
+      return [...prev, { role: 'assistant', text: delta, final, createdAt: Date.now() }];
     });
   }, []);
 
@@ -117,7 +131,7 @@ export function useRealtime(): UseRealtimeReturn {
         case 'conversation.item.input_audio_transcription.completed':
           setTranscript(prev => [
             ...prev,
-            { role: 'user', text: (event.transcript as string | undefined) ?? '', final: true },
+            { role: 'user', text: (event.transcript as string | undefined) ?? '', final: true, createdAt: Date.now() },
           ]);
           break;
 
@@ -161,6 +175,73 @@ export function useRealtime(): UseRealtimeReturn {
     }
   }, []);
 
+  useEffect(() => {
+    return () => {
+      cleanup();
+    };
+  }, [cleanup]);
+
+  const setLocalAudioEnabled = useCallback((enabled: boolean) => {
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    stream.getAudioTracks().forEach(track => {
+      track.enabled = enabled;
+    });
+  }, []);
+
+  const waitForDataChannelOpen = useCallback(async (timeoutMs = 5_000): Promise<void> => {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      const dc = dcRef.current;
+      if (dc && dc.readyState === 'open') return;
+      await new Promise<void>(resolve => setTimeout(resolve, 50));
+    }
+    throw new Error('data_channel_open_timeout');
+  }, []);
+
+  const buildInstructions = useCallback((userInstructions?: string): string => {
+    const currentCorpus = corpusRef.current;
+    return formatCorpusAsInstructions(
+      currentCorpus ?? {
+        currentPage: { url: '', title: '', content: '', wordCount: 0 },
+        linkedPages: [],
+        totalChars: 0,
+        truncated: false,
+      },
+      userInstructions,
+    );
+  }, []);
+
+  const sendGroundingUpdate = useCallback((userInstructions?: string): boolean => {
+    const dc = dcRef.current;
+    if (!dc || dc.readyState !== 'open') return false;
+
+    const instructions = buildInstructions(userInstructions);
+    if (instructions === lastAppliedInstructionsRef.current) return true;
+
+    try {
+      dc.send(
+        JSON.stringify({
+          type: 'session.update',
+          session: {
+            type: 'realtime',
+            instructions,
+            temperature: 0.6,
+            max_response_output_tokens: 200,
+          },
+        }),
+      );
+      lastAppliedInstructionsRef.current = instructions;
+      console.info(
+        `[browselee/rt] grounding sent: ${instructions.length}ch; preview:\n` +
+          instructions.slice(0, 400) + '\n…\n' + instructions.slice(-400),
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  }, [buildInstructions]);
+
   // ── Internal connect ──────────────────────────────────────────────────────
 
   const connect = useCallback(
@@ -169,6 +250,7 @@ export function useRealtime(): UseRealtimeReturn {
 
       setStatus('connecting');
       setError(null);
+      initialInstructionsRef.current = opts?.instructions;
 
       let sessionData: SessionResponse & { ok: true };
       try {
@@ -208,6 +290,10 @@ export function useRealtime(): UseRealtimeReturn {
           audio: { echoCancellation: true, noiseSuppression: true },
         });
         localStreamRef.current = localStream;
+        // Start muted; push-to-talk toggles track state.
+        localStream.getAudioTracks().forEach(track => {
+          track.enabled = false;
+        });
         localStream.getAudioTracks().forEach(t => pc.addTrack(t, localStream));
 
         // Data channel — MUST be named 'oai-events' per Foundry GA contract
@@ -216,16 +302,7 @@ export function useRealtime(): UseRealtimeReturn {
 
         dc.onopen = () => {
           // First message MUST be session.update with session.type:"realtime" (GA requirement)
-          const currentCorpus = corpusRef.current;
-          const instructions = formatCorpusAsInstructions(
-            currentCorpus ?? {
-              currentPage: { url: '', title: '', content: '', wordCount: 0 },
-              linkedPages: [],
-              totalChars: 0,
-              truncated: false,
-            },
-            opts?.instructions,
-          );
+          const instructions = buildInstructions(opts?.instructions);
 
           const whisperDeployment = settings.whisperDeployment;
 
@@ -236,6 +313,9 @@ export function useRealtime(): UseRealtimeReturn {
               model,
               instructions,
               output_modalities: ['audio', 'text'],
+              // Strict grounding: lowest supported temperature, hard cap on response length.
+              temperature: 0.6,
+              max_response_output_tokens: 200,
               audio: {
                 input: {
                   ...(whisperDeployment
@@ -250,6 +330,7 @@ export function useRealtime(): UseRealtimeReturn {
 
           try {
             dc.send(JSON.stringify(sessionUpdate));
+            lastAppliedInstructionsRef.current = instructions;
           } catch {
             // Channel may have closed before first send
           }
@@ -318,32 +399,62 @@ export function useRealtime(): UseRealtimeReturn {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [status, requestSession, handleDcMessage, cleanup],
+    [status, requestSession, handleDcMessage, cleanup, buildInstructions],
   );
+
+  useEffect(() => {
+    if (status !== 'live') return;
+    sendGroundingUpdate(initialInstructionsRef.current);
+  }, [status, corpus, sendGroundingUpdate]);
 
   // ── Public API ────────────────────────────────────────────────────────────
 
   const startVoice = useCallback(async () => {
     await connect();
-  }, [connect]);
+    try {
+      await waitForDataChannelOpen();
+      setLocalAudioEnabled(true);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      setStatus('error');
+    }
+  }, [connect, waitForDataChannelOpen, setLocalAudioEnabled]);
 
   const stopVoice = useCallback(() => {
+    // Push-to-talk release should end capture, not tear down the whole session.
+    setLocalAudioEnabled(false);
+
     const dc = dcRef.current;
     if (dc && dc.readyState === 'open') {
       try {
-        dc.send(JSON.stringify({ type: 'session.close' }));
+        dc.send(JSON.stringify({ type: 'response.create' }));
       } catch { /* ignore */ }
     }
-    cleanup();
-    setStatus('idle');
-  }, [cleanup]);
+  }, [setLocalAudioEnabled]);
 
   const sendText = useCallback(
     async (text: string) => {
+      // HARD GATE: refuse client-side if no usable page corpus yet.
+      if (!hasUsableCorpus(corpusRef.current)) {
+        setTranscript(prev => [
+          ...prev,
+          { role: 'assistant', text: NOT_READY_TEXT, final: true, createdAt: Date.now() },
+        ]);
+        return;
+      }
+
       if (status !== 'live') {
         await connect();
-        // Wait briefly for dc to open
-        await new Promise<void>(res => setTimeout(res, 300));
+      }
+
+      try {
+        await waitForDataChannelOpen();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        console.warn('[browselee/rt] sendText:', msg);
+        return;
       }
 
       const dc = dcRef.current;
@@ -352,8 +463,8 @@ export function useRealtime(): UseRealtimeReturn {
         return;
       }
 
-      // Optimistic transcript entry
-      setTranscript(prev => [...prev, { role: 'user', text, final: true }]);
+      // Guarantee latest corpus is applied to the session before this turn.
+      sendGroundingUpdate(initialInstructionsRef.current);
 
       dc.send(
         JSON.stringify({
@@ -367,7 +478,7 @@ export function useRealtime(): UseRealtimeReturn {
       );
       dc.send(JSON.stringify({ type: 'response.create' }));
     },
-    [status, connect],
+    [status, connect, waitForDataChannelOpen, sendGroundingUpdate],
   );
 
   return { status, startVoice, stopVoice, sendText, transcript, error };
